@@ -1,0 +1,29 @@
+{
+    "name": "settlement",
+    "version": "1.0.0",
+    "description": "",
+    "main": "truffle-config.js",
+    "directories": {
+        "test": "test"
+    },
+    "dependencies": {
+        "@openzeppelin/contracts": "^4.7.3",
+        "@truffle/hdwallet-provider": "^2.0.13",
+        "truffle-assertions": "^0.9.2",
+        "web3-provider-engine": "^16.0.4"
+    },
+    "scripts": {
+        "deploy:dev": "truffle migrate --reset --network development",
+        "deploy:testnet": "truffle migrate --reset --network testnet",
+        "deploy:mainnet": "truffle migrate --reset --network mainnet",
+        "start": "truffle console --network testnet",
+        "test": "truffle test",
+        "verify": "truffle run verify Settlement --network testnet"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "devDependencies": {
+        "truffle-plugin-verify": "^0.5.28"
+    }
+}

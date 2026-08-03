@@ -1,0 +1,8 @@
+version: '3.7'
+services:
+  eth_local:
+      image: trufflesuite/ganache:latest
+      restart: on-failure
+      ports:
+        - 8545:8545
+      command: --port 8545 --chain.chainId 1337 -d -e 1000000000000000000

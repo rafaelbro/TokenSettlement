@@ -1,0 +1,4 @@
+.vscode
+.build/contracts
+build
+node_modules
