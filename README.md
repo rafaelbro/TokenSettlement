@@ -1,4 +1,4 @@
-# EVM Smart Contracts for CCNS
+# EVM Smart Contracts for CCNS (Cross Custodian Net Settlements)
 
 Smart contracts PoC of settlement process
 
