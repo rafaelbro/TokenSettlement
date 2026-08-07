@@ -2,47 +2,66 @@
 // Tells the Solidity compiler to compile only from v0.8.13 to v0.9.0
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "./AccessControl.sol";
+import './SharedStructs.sol';
+import './SharedStructs.sol';
+
+import './SharedStructs.sol';
 
 struct SettlementStruct {
         address debtor;
         address creditor;
-        address[] tokens;
-        uint256[] amounts;
+        SharedStructs.TokenStruct[] transactedTokens;
+        SharedStructs.TokenStruct[] releasedFromDebtorTokens;
+        SharedStructs.TokenStruct[] releasedFromCreditorTokens;
         bool exists;
         bool authorized;
-        bool releaseCreditor;
-        bool releaseDebtor;
 }
 
-contract Settlement {    
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint256 value) external returns (bool);
+    function withdraw(uint _amount) external;
+}
 
-    address private owner;
-    address private executor;
-    bool private _paused;
+contract Settlement {
+    using SafeERC20 for IERC20;    
+
+    address public owner;
+    address public executor;
+    address public WETH_address;
+    IWETH public weth;
+
+    AccessControl accessControl;
     event PendingSettlement(uint256 settlementUUID, address debtor, address creditor);
     event ExecutedSettlement(uint256 settlementUUID, address debtor, address creditor);
     event Deposit(address depositor, address token,  uint256 depositedAmount, uint256 currentAmount);
     event Redemption(address depositor, address token,  uint256 depositedAmount, uint256 currentAmount);
-    event Paused(address account);
-    event Unpaused(address account);
     event CustodianSignature(uint settlementUUID);
-    event Locked(address depositor, address token,  uint256 lockedAmount);
+    event Locked(address depositor, address token,  uint256 lockedAmount, uint256 currentAmount);
     event Unlocked(address depositor, address token,  uint256 lockedAmount);
+    event DeleteSettlement(uint256 settlementUUID);
+    event ReleaseFunds(address settlementUUID);
+    event ChangeOwnership(address newOwner);
+
+
 
 
     mapping(address => mapping (address => uint256)) private custodianBalances;
     mapping(address => mapping (address => uint256)) private lockedCustodianBalances;
     mapping(uint256 => SettlementStruct) private custodianSettlements;
-    mapping(address => bool) private custodianAddresses; 
-    mapping(address => uint8) private custodianCategory; // 0 - Big custodians  1 - Individuals 10 - Marked as releasable
-    mapping(address => bool) private allowableTokens;
 
-    constructor(){
+    constructor(address AccessControlAddress, address executorAddress, address _wEthAddress){
         owner = msg.sender;
-        _paused = false;
+        checkZeroAddress(executorAddress);
+        executor = executorAddress;
+        checkZeroAddress(AccessControlAddress);
+        accessControl = AccessControl(AccessControlAddress);
+        WETH_address = _wEthAddress;
+        weth = IWETH(WETH_address);
+        //_paused = false;
     }
 
     modifier onlyOwner {
@@ -55,88 +74,97 @@ contract Settlement {
         _;
     }
 
-    modifier onlyAllowed {
-        require(custodianAddresses[msg.sender] == true, "Address not allowed");
-        _;
+    function checkZeroAddress(address _address) internal pure {
+        require (_address != address(0), "Invalid address");
     }
 
-    modifier onlyAllowedToken(address tokenAddress) {
-        require(allowableTokens[tokenAddress] == true, "Token not allowed");
-        _;
+    function deposit(address _tokenAddress, uint256 _amount) public {
+        accessControl.onlyAllowed(msg.sender);
+        accessControl.onlyAllowedToken(_tokenAddress);
+        IERC20 token = IERC20(_tokenAddress);
+        token.safeTransferFrom(msg.sender, address(this), _amount);
+        if (accessControl.isBrickAndMortar(msg.sender)){
+            custodianBalances[msg.sender][_tokenAddress] += _amount;
+            emit Deposit(msg.sender, _tokenAddress, _amount, custodianBalances[msg.sender][_tokenAddress]);
+        } else {
+            lockedCustodianBalances[msg.sender][_tokenAddress] += _amount;
+            emit Locked(msg.sender, _tokenAddress, _amount, lockedCustodianBalances[msg.sender][_tokenAddress]);
+        }                
     }
 
-    modifier whenNotPaused() {
-        _requireNotPaused();
-        _;
-    }
-
-    modifier whenPaused() {
-        _requirePaused();
-        _;
-    }
-    
-    function _requirePaused() internal view virtual {
-        require(paused(), "Pausable: not paused");
-    }
-
-    function deposit(address tokenAddress, uint256 amount) public onlyAllowed onlyAllowedToken(tokenAddress) {
-        IERC20 token = IERC20(tokenAddress);
-        SafeERC20.safeTransferFrom(token, msg.sender, address(this), amount);
-        (overflow, custodianBalances[msg.sender][tokenAddress]) = SafeMath.tryAdd(custodianBalances[msg.sender][tokenAddress], amount);
-        require(overflow, "Operation overflow");
-        emit Deposit(msg.sender, tokenAddress, amount, custodianBalances[msg.sender][tokenAddress]);
-    }
-
-    function lockFunds(address tokenAddress, uint256 amount) public onlyAllowed onlyAllowedToken(tokenAddress) {
-        bool operationOverflow = false;
-        if(custodianCategory[msg.sender] == 10) custodianCategory [msg.sender] == 1; //relocks custodian after marked for release
-        require(custodianCategory[msg.sender] == 1, "This custodian category cannot lock funds");
-        //moves from unlocked debtor to locked debtor
-        (operationOverflow, custodianBalances[msg.sender][tokenAddress], lockedCustodianBalances[msg.sender][tokenAddress]) = 
-            _moveFunds(custodianBalances[msg.sender][tokenAddress], lockedCustodianBalances[msg.sender][tokenAddress], amount);
-        require(operationOverFlow, "Could not lock due to insuficient funds");
-        emit Locked(msg.sender, tokenAddress, amount);
-    }
-
-    function unlockFunds(address tokenAddress) public {
-        bool operationOverflow = false;
-        require(custodianCategory[msg.sender] == 10, "This custodian is not marked for release");
-        //releases funds of token address
-        (operationOverflow, custodianBalances[msg.sender][tokenAddress]) = SafeMath.tryAdd(custodianBalances[msg.sender][tokenAddress], lockedCustodianBalances[msg.sender][tokenAddress]);
-        lockedCustodianBalances[msg.sender][tokenAddress] = 0;
-        require(operationOverFlow, "Could not unlock due to overflow");
-        emit Unlocked(msg.sender, tokenAddress);
-    }
-
-    function createPendingSettlement(uint256 settlementUUID, address debtor, address creditor, address[] memory tokenAddresses, 
-        uint256[] memory tokenAmounts, bool releaseCreditor, bool releaseDebtor) external onlyExecutor whenNotPaused {
-        require ((custodianAddresses[creditor] && custodianAddresses[debtor]), "Invalid creditor/debtor");
-        require(tokenAddresses.length == tokenAmounts.length, "Invalid tokens addresses and amount pairs");
-        require(!custodianSettlements[settlementUUID].exists, "Settlement already exists");
-        for(uint index = 0; index < tokenAddresses.length; index++) {
-            require(allowableTokens[tokenAddresses[index]], "Invalid token used");
+    receive() external payable {
+        accessControl.onlyAllowed(msg.sender);
+        require(msg.value > 0, "No ETH sent");
+        uint msgValue = msg.value;
+        weth.deposit{value: msg.value}();
+        if (accessControl.isBrickAndMortar(msg.sender)){
+            custodianBalances[msg.sender][WETH_address] += msgValue;
+            emit Deposit(msg.sender, WETH_address, msgValue, custodianBalances[msg.sender][WETH_address]);
+        } else {
+            lockedCustodianBalances[msg.sender][WETH_address] += msgValue;
+            emit Locked(msg.sender, WETH_address, msgValue, lockedCustodianBalances[msg.sender][WETH_address]);
         }
-        custodianSettlements[settlementUUID] = SettlementStruct(debtor, creditor, tokenAddresses, tokenAmounts, true, false, releaseCreditor, releaseDebtor);
-        emit PendingSettlement(settlementUUID, debtor, creditor);
     }
 
-    function authorizeSettlement(uint256 settlementUUID) public onlyAllowed {
-        require(_mappingObjectExists(settlementUUID), "Tried to sign inexistent settlement");
-        require(custodianCategory[custodianSettlements[settlementUUID].debtor], "This custodian type cannot authorize settlements");
-        require(msg.sender == custodianSettlements[settlementUUID].debtor, "Address is not the debtor of the settlement");
-        custodianSettlements[settlementUUID].authorized = true;
-        _lockFunds(settlementUUID);
-        emit CustodianSignature(settlementUUID);
+    function createPendingSettlement(uint256 _settlementUUID, address _debtor, address _creditor, SharedStructs.TokenStruct[] memory _transactedTokens, 
+        SharedStructs.TokenStruct[] memory _releasedFromDebtor, SharedStructs.TokenStruct[] memory _releasedFromCreditor) external onlyExecutor /*whenNotPaused*/ {
+        require(!custodianSettlements[_settlementUUID].exists, "Settlement already exists");
+        accessControl.validateSettlement(_creditor, _debtor);
+        SettlementStruct storage newSettlement = custodianSettlements[_settlementUUID];
+        newSettlement.debtor = _debtor;
+        newSettlement.creditor = _creditor;
+        newSettlement.exists = true;
+        newSettlement.authorized = false;
+        for (uint256 i = 0; i < _transactedTokens.length; i++) {
+            require(accessControl.getTokenAllowable(_transactedTokens[i].tokenAddress), "not allowed token");
+            newSettlement.transactedTokens.push(_transactedTokens[i]);
+        }
+        if(_releasedFromDebtor.length > 0){
+            require(accessControl.isVirtualCustodian(_debtor), "not VC to have funds released");
+            for (uint256 i = 0; i < _releasedFromDebtor.length; i++) {
+                require(accessControl.getTokenAllowable(_releasedFromDebtor[i].tokenAddress), "not allowed token");
+                newSettlement.releasedFromDebtorTokens.push(_releasedFromDebtor[i]);
+            }
+        }
+        if(_releasedFromCreditor.length > 0){
+            require(accessControl.isVirtualCustodian(_creditor), "not VC to have funds released");        
+            for (uint256 i = 0; i < _releasedFromCreditor.length; i++) {
+                require(accessControl.getTokenAllowable(_releasedFromCreditor[i].tokenAddress), "not allowed token");
+                newSettlement.releasedFromCreditorTokens.push(_releasedFromCreditor[i]);
+            }
+        }
+        emit PendingSettlement(_settlementUUID, _debtor, _creditor);
     }
 
-    function executeSettlement(uint256[] memory executedIds) external onlyExecutor whenNotPaused {
-        for (uint256 settlementIndex= 0; settlementIndex < executedIds.length; settlementIndex++) {
-            require(_mappingObjectExists(executedIds[settlementIndex]), "Tried to settle inexistent settlement");
-            //Debtor is either custodian type 0 that requires authorization or 1 that doesn't TODO: DEFINE A BETTER RULE
-            require(custodianSettlements[executedIds[settlementIndex]].authorized || 
-                custodianCategory[custodianSettlements[executedIds[settlementIndex]].debtor] == 1, "Settlement needs to be signed before executed");
-            _settle(executedIds[settlementIndex]);
-            _freeStorage(executedIds[settlementIndex]);
+    function authorizeSettlement(uint256 _settlementUUID) public {
+        accessControl.onlyAllowed(msg.sender);
+        require(!custodianSettlements[_settlementUUID].authorized, "settlement already authorized");
+        require(_mappingObjectExists(_settlementUUID), "Inexistent settlement");
+        if (accessControl.isBrickAndMortar(msg.sender)) {
+            require(msg.sender == custodianSettlements[_settlementUUID].debtor, "Address is not the debtor");
+            _lockFunds(_settlementUUID);
+        }
+        else if (accessControl.isVirtualCustodian(custodianSettlements[_settlementUUID].debtor)) {
+            require(accessControl.isAuditor(msg.sender));
+        } else {
+            revert("Invalid custodian category");
+        }
+        custodianSettlements[_settlementUUID].authorized = true;
+        emit CustodianSignature(_settlementUUID);
+    }
+
+    function authorizeMultiple(uint256[] memory _settlementUUIDs) public {
+        for (uint256 i = 0; i< _settlementUUIDs.length; i++) {
+            authorizeSettlement(_settlementUUIDs[i]);
+        }
+    }
+
+    function executeSettlement(uint256[] memory _executedIds) external onlyExecutor {
+        for (uint256 settlementIndex= 0; settlementIndex < _executedIds.length; settlementIndex++) {
+            require(_mappingObjectExists(_executedIds[settlementIndex]), "Inexistent settlement");
+            require(custodianSettlements[_executedIds[settlementIndex]].authorized, "Settlement not signed");
+            _settle(_executedIds[settlementIndex]);
+            _freeStorage(_executedIds[settlementIndex]);
         }
     }
 
@@ -144,151 +172,111 @@ contract Settlement {
         return custodianSettlements[settlementUUID].exists == true ? true : false;
     }
 
-    function _settle(uint256 settlementUUID) private {
-        bool overflow = true;
-        SettlementStruct storage settlement = custodianSettlements[settlementUUID];
-        require(custodianCategory[settlement.debtor] != 10 && custodianCategory[settlement.creditor] != 10, "creditor or debtor marked as released");
-        for (uint index = 0; index < settlement.tokens.length; index++) {
-            bool operationOverflow = false;
-            if(custodianCategory[settlement.creditor] == 0) {
-            //moves from locked debtor to unlocked creditor if creditor is category 0 or if funds are marked for release
-                (operationOverflow, lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], custodianBalances[settlement.creditor][settlement.tokens[index]]) = 
-                        _moveFunds(lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], custodianBalances[settlement.creditor][settlement.tokens[index]], settlement.amounts[index]);
-                overflow = operationOverflow && overflow;
-            } else if (custodianCategory[settlement.creditor] == 1) {
-                //moves from locked debtor to locked creditor if creditor is category 1
-                (operationOverflow, lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], lockedCustodianBalances[settlement.creditor][settlement.tokens[index]]) = 
-                    _moveFunds(lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], lockedCustodianBalances[settlement.creditor][settlement.tokens[index]], settlement.amounts[index]);
-                overflow = operationOverflow && overflow;
+    function _settle(uint256 _settlementUUID) private {
+        SettlementStruct storage settlement = custodianSettlements[_settlementUUID];
+        for (uint index = 0; index < settlement.transactedTokens.length; index++) {
+            if(accessControl.isBrickAndMortar(settlement.creditor)) {
+            //moves from locked debtor to unlocked creditor if creditor is category 1(BRICK)
+                lockedCustodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] -= settlement.transactedTokens[index].tokenAmount;
+                custodianBalances[settlement.creditor][settlement.transactedTokens[index].tokenAddress] += settlement.transactedTokens[index].tokenAmount;
+            } else if (accessControl.isVirtualCustodian(settlement.creditor)) {
+                //moves from locked debtor to locked creditor if creditor is category 2(VC)
+                lockedCustodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] -= settlement.transactedTokens[index].tokenAmount;
+                lockedCustodianBalances[settlement.creditor][settlement.transactedTokens[index].tokenAddress] += settlement.transactedTokens[index].tokenAmount;
             }
         }
-        if (settlement.releaseCreditor == true && custodianCategory[settlement.creditor] == 1) custodianCategory[settlement.creditor] = 10;
-        if (settlement.releaseDebtor == true && custodianCategory[settlement.debtor] == 1) custodianCategory[settlement.debtor] = 10;
-        require(overflow, "Could not settle due to insuficient funds");
-        emit ExecutedSettlement(settlementUUID, settlement.debtor, settlement.creditor);
+        if (settlement.releasedFromDebtorTokens.length != 0) _unlockFunds(settlement.debtor, settlement.releasedFromDebtorTokens);
+        if (settlement.releasedFromCreditorTokens.length != 0) _unlockFunds(settlement.creditor, settlement.releasedFromCreditorTokens);
+        emit ExecutedSettlement(_settlementUUID, settlement.debtor, settlement.creditor);
     }
 
-    function _lockFunds(uint256 settlementUUID) private {
-        bool overflow = true;
-        SettlementStruct storage settlement = custodianSettlements[settlementUUID];
-        for (uint index = 0; index < settlement.tokens.length; index++) {
-            bool operationOverflow = false;
+    function _lockFunds(uint256 _settlementUUID) private {
+        SettlementStruct storage settlement = custodianSettlements[_settlementUUID];
+        for (uint index = 0; index < settlement.transactedTokens.length; index++) {
             //moves from unlocked debtor to locked debtor
-            (operationOverflow, custodianBalances[settlement.debtor][settlement.tokens[index]], lockedCustodianBalances[settlement.debtor][settlement.tokens[index]]) = 
-                    _moveFunds(custodianBalances[settlement.debtor][settlement.tokens[index]], lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], settlement.amounts[index]);
-            overflow = operationOverflow && overflow;
+            custodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] -= settlement.transactedTokens[index].tokenAmount;
+            lockedCustodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] += settlement.transactedTokens[index].tokenAmount;
         }
-        require(overflow, "Could not lock due to insuficient funds");
     }
 
     function _freeStorage(uint256 key) private {
-        SettlementStruct memory emptyStruct;
-        custodianSettlements[key] = emptyStruct;
+        delete custodianSettlements[key].transactedTokens;
+        delete custodianSettlements[key].releasedFromDebtorTokens;
+        delete custodianSettlements[key].releasedFromCreditorTokens;
+
+        delete custodianSettlements[key].debtor;
+        delete custodianSettlements[key].creditor;
+        custodianSettlements[key].exists = false;
+        custodianSettlements[key].authorized = false;
     }
 
-    function redeem(address tokenAddress, uint256 amount) public onlyAllowed {
-        IERC20 token = IERC20(tokenAddress);
-        require(amount <= custodianBalances[msg.sender][tokenAddress], "Insuficient funds");
-        (, custodianBalances[msg.sender][tokenAddress]) = SafeMath.trySub(custodianBalances[msg.sender][tokenAddress], amount);
-        SafeERC20.safeTransfer(token, msg.sender, amount);
-        emit Redemption(msg.sender, tokenAddress, amount, custodianBalances[msg.sender][tokenAddress]);        
+    function redeem(address _tokenAddress, uint256 _amount) public {
+        accessControl.onlyAllowed(msg.sender);
+        IERC20 token = IERC20(_tokenAddress);
+        require(_amount <= custodianBalances[msg.sender][_tokenAddress], "Insuficient funds");
+        custodianBalances[msg.sender][_tokenAddress] -= _amount;
+        if(_tokenAddress == WETH_address) {
+            require(weth.transfer(msg.sender,_amount), "Failed to transfer");
+        } else {
+            token.safeTransfer(msg.sender, _amount);
+        }
+        emit Redemption(msg.sender, _tokenAddress, _amount, custodianBalances[msg.sender][_tokenAddress]);        
     }
 
-    function getBalanceOfToken(address custodianAddress, address tokenAddress) public view returns (uint256){
-        return custodianBalances[custodianAddress][tokenAddress];
+    function getBalancesOfToken(address _custodianAddress, address _tokenAddress) public view returns (uint256 balance, uint256 lockedBalance){
+        return (custodianBalances[_custodianAddress][_tokenAddress], lockedCustodianBalances[_custodianAddress][_tokenAddress]);
     }
 
-    function getLockedBalanceOfToken(address custodianAddress, address tokenAddress) public view returns (uint256){
-        return lockedCustodianBalances[custodianAddress][tokenAddress];
+    function getSettlementData(uint256 _settlementId) public view returns (address debtor, address creditor, 
+        SharedStructs.TokenStruct[] memory transactedTokens, SharedStructs.TokenStruct[] memory releasedFromDebtorTokens, 
+        SharedStructs.TokenStruct[] memory releasedFromCreditorTokens, bool authorized) {
+        return (custodianSettlements[_settlementId].debtor, custodianSettlements[_settlementId].creditor, 
+            custodianSettlements[_settlementId].transactedTokens, custodianSettlements[_settlementId].releasedFromDebtorTokens,
+            custodianSettlements[_settlementId].releasedFromCreditorTokens, 
+            custodianSettlements[_settlementId].authorized);
     }
 
-    function getSettlementData(uint256 settlementId) public view returns (address debtor, address creditor, 
-        address[] memory tokens, uint256[] memory amounts, bool authorized) {
-        return (custodianSettlements[settlementId].debtor, custodianSettlements[settlementId].creditor, 
-            custodianSettlements[settlementId].tokens, custodianSettlements[settlementId].amounts, custodianSettlements[settlementId].authorized);
+    function getContractData() public view returns (address executorAddress, address adminAddress){
+        return (executor, owner);
     }
 
-    function setExecutor(address executorAddress) external onlyOwner {
-        executor = executorAddress;
-    }
-
-    function getExecutor()  public view returns (address) {
-        return executor;
-    }
-
-    function setCustodianAllowable(address custodianAddress, uint8 custodianCategory) external onlyOwner {
-        custodianAddresses[custodianAddress] = true;
-        custodianCategory[custodianAddresses] = custodianCategory;
-    }
-
-    function removeAddressAllowable(address custodianAddress) external onlyOwner {
-        custodianAddresses[custodianAddress] = false;
-    }
-
-    function getAddressAllowable(address custodianAddress) public view returns (bool) {
-        return custodianAddresses[custodianAddress];
-    }
-
-    function setTokenAllowable(address tokenAddress) external onlyOwner {
-        allowableTokens[tokenAddress] = true;
-    }
-
-    function removeTokenAllowable(address tokenAddress) external onlyOwner {
-        allowableTokens[tokenAddress] = false;
-    }
-
-    function getTokenAllowable(address tokenAddress) public view returns (bool) {
-        return allowableTokens[tokenAddress];
-    }
-
-    function paused() public view virtual returns (bool) {
-        return _paused;
-    }
-
-    function _requireNotPaused() internal view virtual {
-        require(!paused(), "Pausable: paused");
-    }
-
-    function pause() external whenNotPaused onlyOwner {
-        _paused = true;
-        emit Paused(msg.sender);
-    }
-
-    function unpause() external whenPaused onlyOwner {
-        _paused = false;
-        emit Unpaused(msg.sender);
+    function _unlockFunds(address entity, SharedStructs.TokenStruct[] memory tokens) internal {
+        for (uint index = 0; index < tokens.length; index++) {
+            lockedCustodianBalances[entity][tokens[index].tokenAddress] -= tokens[index].tokenAmount;
+            custodianBalances[entity][tokens[index].tokenAddress] += tokens[index].tokenAmount;
+        }
     }
     
-    function changeOwnership(address ownerAddress) external onlyOwner {
-        owner = ownerAddress;
-    }
-
-    function getOwner() public view returns (address) {
-        return owner;
-    }
-
-    function _moveFunds(uint256 debtorAmt, uint256 creditorAmt, uint256 amt) internal pure 
-        returns (bool overflow, uint256 debtorBalance, uint256 creditorBalance) {
-        bool overflowSub = false;
-        bool overflowAdd = false;           
-        (overflowSub , debtorBalance) = SafeMath.trySub(debtorAmt, amt);
-        (overflowAdd, creditorBalance) = SafeMath.tryAdd(creditorAmt, amt);
-        return (overflowSub && overflowAdd, debtorBalance, creditorBalance);
-    }
-
-    function deleteSettlement(uint256 settlementUUID) external onlyOwner {
-        if (custodianSettlements[settlementUUID].authorized){
-            bool overflow = true;
-            SettlementStruct storage settlement = custodianSettlements[settlementUUID];
-            for (uint index = 0; index < settlement.tokens.length; index++) {
-                bool operationOverflow = false;
-                //moves from locked debtor to unlocked debtor      
-                (operationOverflow, lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], custodianBalances[settlement.debtor][settlement.tokens[index]]) = 
-                    _moveFunds(lockedCustodianBalances[settlement.debtor][settlement.tokens[index]], custodianBalances[settlement.debtor][settlement.tokens[index]], settlement.amounts[index]);
-                overflow = operationOverflow && overflow;
+    function deleteSettlement(uint256 _settlementUUID) external onlyOwner {
+        if (!accessControl.isVirtualCustodian(custodianSettlements[_settlementUUID].debtor)){
+            //Only non VC users need to move funds
+            if (custodianSettlements[_settlementUUID].authorized){
+            SettlementStruct storage settlement = custodianSettlements[_settlementUUID];
+                for (uint index = 0; index < settlement.transactedTokens.length; index++) {
+                    //moves from locked debtor to unlocked debtor
+                    lockedCustodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] -= settlement.transactedTokens[index].tokenAmount;      
+                    custodianBalances[settlement.debtor][settlement.transactedTokens[index].tokenAddress] += settlement.transactedTokens[index].tokenAmount; 
+                }
             }
-            require(overflow, "Could not settle due to insuficient funds");
+        }        
+        _freeStorage(_settlementUUID);
+        emit DeleteSettlement(_settlementUUID);
+
+    }
+
+    function releaseFunds(address custodianAddress, address[] calldata tokenAddresses) external onlyOwner {
+        require(accessControl.isVirtualCustodian(custodianAddress), "cannot release non VCs");
+        for(uint index = 0; index < tokenAddresses.length; index++){
+            uint amount = lockedCustodianBalances[custodianAddress][tokenAddresses[index]];
+            lockedCustodianBalances[custodianAddress][tokenAddresses[index]] -= amount;
+            custodianBalances[custodianAddress][tokenAddresses[index]] += amount;
         }
-        _freeStorage(settlementUUID);
+        emit ReleaseFunds(custodianAddress);
+    }
+
+    function changeOwnership(address _ownerAddress) external onlyOwner {
+        checkZeroAddress(_ownerAddress);
+        owner = _ownerAddress;
+        emit ChangeOwnership(_ownerAddress);
     }
 }
