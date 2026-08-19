@@ -4,7 +4,7 @@ Smart contracts PoC of settlement process
 
 ## Overview
 
-This project aims to provide the ability to execute a settlement process. This happens through the execution of the following methods inside the smart contract: `createPendingSettlement` and `executeSettlement`. Those are executed on the Bosonic side and they work the following way:
+This project aims to provide the ability to execute a settlement process. This happens through the execution of the following methods inside the smart contract: `createPendingSettlement` and `executeSettlement`. Those are executed off-chain by the executor and they work the following way:
 
 `createPendingSettlement`: Receives an ID of the settlement process and native blockchain addresses of the debtor and creditor of the settlement. Along those values we need to inform in a respective array the token addresses that need to be settled for, along with the values of those associated tokens.
 

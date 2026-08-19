@@ -26,7 +26,7 @@ contract('Settlement', (accounts) => {
   before(async () => {
     custodianMocks = 
     {
-      BOSONIC: accounts[0],
+      EXCHANGE: accounts[0],
       JPM: accounts[1],
       BOA: accounts[2],
       BANK: accounts[3],
@@ -38,9 +38,9 @@ contract('Settlement', (accounts) => {
   beforeEach(async () => {
     settlementInstance = await Settlement.new({from: custodianMocks.ADMIN});
     await settlementInstance.setExecutor(custodianMocks.EXECUTOR, {from: custodianMocks.ADMIN});
-    token1Instance = await Token1.new({from: custodianMocks.BOSONIC});
-    token2Instance = await Token2.new({from: custodianMocks.BOSONIC});
-    token3Instance = await Token3.new({from: custodianMocks.BOSONIC});
+    token1Instance = await Token1.new({from: custodianMocks.EXCHANGE});
+    token2Instance = await Token2.new({from: custodianMocks.EXCHANGE});
+    token3Instance = await Token3.new({from: custodianMocks.EXCHANGE});
   });
   async function setCustodiansAndTokensAsAllowable(custodianAddresses, tokenAddresses) {
     for (address of custodianAddresses) {
@@ -53,7 +53,7 @@ contract('Settlement', (accounts) => {
   async function approveAndDepositTokens(tokensInstances, amounts, custodianAddress){
     assert(tokensInstances.length === amounts.length);
     for (index = 0; index < tokensInstances.length; index++) {      
-      await tokensInstances[index].transfer(custodianAddress, amounts[index], {from: custodianMocks.BOSONIC});
+      await tokensInstances[index].transfer(custodianAddress, amounts[index], {from: custodianMocks.EXCHANGE});
       await tokensInstances[index].approve(settlementInstance.address, amounts[index], {from: custodianAddress});
       await settlementInstance.deposit(tokensInstances[index].address, amounts[index], {from: custodianAddress});
     }
@@ -70,29 +70,29 @@ contract('Settlement', (accounts) => {
   describe('deposit', () => {
     describe('deposit token', () => {
       it('has correct balance for depositor and zero for non depositor', async () => {
-        await setCustodiansAndTokensAsAllowable([custodianMocks.BOSONIC], [token1Instance.address]);
-        await approveAndDepositTokens([token1Instance], [1000], custodianMocks.BOSONIC);
+        await setCustodiansAndTokensAsAllowable([custodianMocks.EXCHANGE], [token1Instance.address]);
+        await approveAndDepositTokens([token1Instance], [1000], custodianMocks.EXCHANGE);
 
         var contractBalanceOfToken1 = await token1Instance.balanceOf.call(settlementInstance.address);
         assert(contractBalanceOfToken1.toString() === "1000");
-        const resultFromDepositor = await settlementInstance.getBalanceOfToken.call(custodianMocks.BOSONIC, token1Instance.address);
+        const resultFromDepositor = await settlementInstance.getBalanceOfToken.call(custodianMocks.EXCHANGE, token1Instance.address);
         assert(resultFromDepositor.toString() === "1000");
         const resultFromOther = await settlementInstance.getBalanceOfToken.call(custodianMocks.JPM, token1Instance.address);
         assert(resultFromOther.toString() === "0");
       });
       it('throws error when deposited token does not have allowance', async () => {
-        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.BOSONIC}));
+        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.EXCHANGE}));
       });
       it('throws error when depositor is not registered', async () => {
         await setCustodiansAndTokensAsAllowable([], [token1Instance.address]);
         await settlementInstance.setTokenAllowable(token1Instance.address, {from: custodianMocks.ADMIN});
-        await token1Instance.approve(settlementInstance.address, 1000, {from: custodianMocks.BOSONIC});
-        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.BOSONIC}));
+        await token1Instance.approve(settlementInstance.address, 1000, {from: custodianMocks.EXCHANGE});
+        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.EXCHANGE}));
       });
       it('throws error when token deposited is not registered', async () => {
-        await setCustodiansAndTokensAsAllowable([custodianMocks.BOSONIC], []);
-        await token1Instance.approve(settlementInstance.address, 1000, {from: custodianMocks.BOSONIC});
-        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.BOSONIC}));
+        await setCustodiansAndTokensAsAllowable([custodianMocks.EXCHANGE], []);
+        await token1Instance.approve(settlementInstance.address, 1000, {from: custodianMocks.EXCHANGE});
+        truffleAssert.fails(settlementInstance.deposit(token1Instance.address, 1000, {from: custodianMocks.EXCHANGE}));
       });
     });  
   });
@@ -308,7 +308,7 @@ contract('Settlement', (accounts) => {
       it('fails', async () => {
         await setCustodiansAndTokensAsAllowable([custodianMocks.BOA, custodianMocks.JPM], [token1Instance.address, token2Instance.address]);
         //Deposits tokens to custodian
-        await token1Instance.transfer(custodianMocks.JPM, 5000, {from: custodianMocks.BOSONIC});
+        await token1Instance.transfer(custodianMocks.JPM, 5000, {from: custodianMocks.EXCHANGE});
         //Creates Pending Settlement from JPM to BOA
         await truffleAssert.passes(await settlementInstance.createPendingSettlement(0, custodianMocks.JPM, custodianMocks.BOA, [token1Instance.address, token2Instance.address], 
           [600, 300], {from: custodianMocks.EXECUTOR}));
@@ -347,8 +347,8 @@ contract('Settlement', (accounts) => {
       it('does not redeem more than what is owed even when contract has the balance', async () => {
         await setCustodiansAndTokensAsAllowable([custodianMocks.JPM, custodianMocks.BOA], [token1Instance.address]);
 
-        await token1Instance.transfer(custodianMocks.JPM, 5000, {from: custodianMocks.BOSONIC});
-        await token1Instance.transfer(custodianMocks.BOA, 7000, {from: custodianMocks.BOSONIC});
+        await token1Instance.transfer(custodianMocks.JPM, 5000, {from: custodianMocks.EXCHANGE});
+        await token1Instance.transfer(custodianMocks.BOA, 7000, {from: custodianMocks.EXCHANGE});
         await token1Instance.approve(settlementInstance.address, 1000, {from: custodianMocks.JPM});
         await token1Instance.approve(settlementInstance.address, 5000, {from: custodianMocks.BOA});
         await settlementInstance.deposit(token1Instance.address, 500, {from: custodianMocks.JPM});
@@ -377,14 +377,14 @@ contract('Settlement', (accounts) => {
     describe('setExecutor', () => {
       it('sets new executor', async () => {
         const oldExecutor = await settlementInstance.getExecutor.call();
-        await settlementInstance.setExecutor(custodianMocks.BOSONIC, {from: custodianMocks.ADMIN});
+        await settlementInstance.setExecutor(custodianMocks.EXCHANGE, {from: custodianMocks.ADMIN});
         const newExecutor = await settlementInstance.getExecutor.call();
         assert(oldExecutor === custodianMocks.EXECUTOR);
-        assert(newExecutor === custodianMocks.BOSONIC);        
+        assert(newExecutor === custodianMocks.EXCHANGE);        
       });
       it('fails when not executed by admin and keeps previous state', async () => {
         const oldExecutor = await settlementInstance.getExecutor.call();
-        await truffleAssert.fails(settlementInstance.setExecutor(custodianMocks.BOSONIC, {from: custodianMocks.JPM}));
+        await truffleAssert.fails(settlementInstance.setExecutor(custodianMocks.EXCHANGE, {from: custodianMocks.JPM}));
         const newExecutor = await settlementInstance.getExecutor.call();
         assert(oldExecutor === newExecutor);
       });
